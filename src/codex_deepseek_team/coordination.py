@@ -1647,6 +1647,26 @@ def plan_task(root: Path, task_id: str, plan: dict) -> dict:
                 assignments.append(assignment)
             task.pop('routing_committed', None)
             task['schema'] = 2
+            # Re-anchor the planning HEAD while nothing is allocated yet.
+            #
+            # `base_head` is written once, when the task is opened, and allocation
+            # refuses any copy whose source HEAD has moved since. Coordination tasks
+            # live across a whole session, though, and a coordinator that commits its
+            # own work mid-session therefore kills every worker launch remaining in
+            # that task: preparation answers "Source HEAD changed since planning",
+            # no copy is allocated, and the only way out is to close the task and
+            # wait for a new one. Measured on one project: two consecutive launches
+            # of the same review never started for this reason.
+            #
+            # The condition is the narrow part. A head is re-anchored only when NO
+            # assignment of this task holds a workspace or a job — that is, when no
+            # copy exists that could be bound to the old head. Started work, resumes
+            # and `correction_of` links all imply an allocated copy, so they are
+            # untouched by construction, and the staleness check keeps protecting
+            # exactly what it was written for.
+            if not any(row.get('workspace_id') or row.get('job_id')
+                       for row in task.get('assignments', []) or []):
+                task['base_head'] = _head(root)
             task.update(classification=classification,
                         small_evidence=plan.get("small_evidence"),
                         deliverables=deliverables, assignments=assignments,
