@@ -434,7 +434,32 @@ def _command(words: list[_Token]) -> _Result:
         if paths is None:
             result.write([])
         elif name == 'cp':
-            result.write(paths[-1:] if len(paths) >= 2 else [])
+            # `cp SRC... DIR/` writes INTO the directory, so the paths it creates are
+            # `DIR/<basename>`, not `DIR` itself. Naming the directory made the scope
+            # check fail against a declared FILE, and the mutation was refused as
+            # unmappable even though every path it touches was declared.
+            #
+            # Only the provable shapes are expanded: an explicit trailing slash, or
+            # more than one source (which cannot be a rename). A bare `cp a b` stays
+            # a single destination, because deciding whether `b` is an existing
+            # directory would mean touching the filesystem, and this parser reads the
+            # command only.
+            if len(paths) >= 2:
+                destination, sources = paths[-1], paths[:-1]
+                if len(sources) > 1 or destination.value.endswith('/'):
+                    base = destination.value.rstrip('/')
+                    result.write([
+                        _Token(value=posixpath.join(base,
+                                                    posixpath.basename(
+                                                        source.value.rstrip('/'))),
+                               dynamic=source.dynamic or destination.dynamic,
+                               quoted=source.quoted)
+                        for source in sources
+                    ])
+                else:
+                    result.write([destination])
+            else:
+                result.write([])
         elif name == 'mv':
             result.write(paths if len(paths) >= 2 else [])
         elif paths:
