@@ -98,10 +98,23 @@ def validate_features(value: dict) -> dict:
     if not isinstance(value, dict) or set(value) - set(FEATURE_DEFAULTS):
         raise RoutingError('Feature card contains unsupported fields; never include prompts, code or paths.')
     result = dict(FEATURE_DEFAULTS, **value)
-    for key, allowed in FEATURE_VALUES.items():
-        if not isinstance(result[key], str) or result[key] not in allowed:
-            raise RoutingError(
-                f'Invalid feature {key}; allowed values: {", ".join(sorted(allowed))}.')
+    # Report EVERY invalid field at once. A card is written by hand and usually has
+    # more than one wrong value; failing on the first one turns a single fix into a
+    # sequence of round trips, each one revealing exactly one more problem.
+    # The single-field message is kept byte for byte, so existing callers that match
+    # on it keep working; only the multi-field case gets the new wording.
+    invalid = [
+        (key, allowed) for key, allowed in FEATURE_VALUES.items()
+        if not isinstance(result[key], str) or result[key] not in allowed
+    ]
+    if len(invalid) == 1:
+        key, allowed = invalid[0]
+        raise RoutingError(
+            f'Invalid feature {key}; allowed values: {", ".join(sorted(allowed))}.')
+    if invalid:
+        detail = "; ".join(
+            f'{key}: {", ".join(sorted(allowed))}' for key, allowed in invalid)
+        raise RoutingError(f'Invalid features ({len(invalid)}) — allowed values are {detail}.')
     # A stored card may still carry the legacy 'medium' spelling; normalize it so
     # medium and high compare equal in identities, families and evidence keys.
     result['effort'] = normalize_effort(result['effort'])

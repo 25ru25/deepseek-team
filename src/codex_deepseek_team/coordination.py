@@ -1498,8 +1498,22 @@ def _prepare_routing(root, task, items, service):
             # canonical feature card but keep the stored spelling so its routing
             # decision binding stays valid without a destructive rewrite.
             canonical_prior = dict(prior, features=validate_features(prior['features']))
-            if _definition(item) != _definition(canonical_prior) or item['executor'] not in (prior['executor'], 'auto'):
-                raise CoordinationError('Started deliverable scope and features are immutable; use a new deliverable id.', 64)
+            now_def, was_def = _definition(item), _definition(canonical_prior)
+            if now_def != was_def or item['executor'] not in (prior['executor'], 'auto'):
+                # Name WHAT changed. The refusal is correct, but without the field
+                # names the author has to diff the plan against the ledger by hand to
+                # find which of scope, acceptance, checks, dependencies, features or
+                # executor moved — and the ledger is private state.
+                changed = sorted(
+                    key for key in set(now_def) | set(was_def)
+                    if now_def.get(key) != was_def.get(key)
+                )
+                if item['executor'] not in (prior['executor'], 'auto'):
+                    changed.append(
+                        f"executor ({prior['executor']} -> {item['executor']})")
+                raise CoordinationError(
+                    'Started deliverable scope and features are immutable; use a new '
+                    'deliverable id. Changed: ' + ', '.join(changed) + '.', 64)
             item['features'] = prior['features']
             item['executor'] = prior['executor']
             item['routing'] = prior.get('routing')
