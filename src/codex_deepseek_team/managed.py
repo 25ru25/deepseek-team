@@ -26,6 +26,27 @@ _UNCERTAIN_READINESS_MARKERS = (
 )
 
 
+
+def _check_ceiling(args) -> float:
+    """Per-command ceiling for declared checks.
+
+    Defaults to the historical 120 s. `0` removes the per-command ceiling and
+    leaves only the total job deadline, which is what a compiler or a full test
+    suite needs; anything else is used as given.
+    """
+    value = getattr(args, 'check_timeout', 120)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 120.0
+    if value < 0:
+        return 120.0
+    # `0` means "no per-command ceiling". It is expressed as a large finite value
+    # rather than zero or infinity, because the runner takes
+    # `min(timeout, deadline - now)` and feeds the result to a selector: zero kills
+    # the command immediately and infinity is not a valid selector timeout.
+    return 86_400.0 if value == 0 else value
+
 def _uncertain_readiness(error) -> bool:
     message = str(getattr(error, 'message', error)).lower()
     return any(marker in message for marker in _UNCERTAIN_READINESS_MARKERS)
@@ -301,6 +322,7 @@ def run(args, policy: settings.Policy, api, copy=None) -> int:
                 force_checks = bool(getattr(args, 'force_checks', False))
                 copy.metadata['verification_commands'] = list(commands)
                 baseline_checks = development.run_checks(layout, env, commands,
+                    timeout=_check_ceiling(args),
                     deadline=args.job_deadline, directory=diagnostics, phase='baseline',
                     copy=copy, reusable=checks_reusable, force=force_checks)
                 copy.metadata['baseline_checks'] = baseline_checks
@@ -374,7 +396,8 @@ def run(args, policy: settings.Policy, api, copy=None) -> int:
                         check_results = []
                         if code == 0 and coord_item is not None:
                             check_results = development.run_checks(
-                                layout, env, commands, deadline=args.job_deadline,
+                                layout, env, commands, timeout=_check_ceiling(args),
+                                deadline=args.job_deadline,
                                 directory=diagnostics, phase='post', redact_values=(key,),
                                 copy=copy, reusable=checks_reusable, force=force_checks)
                             if any(row['exit_code'] != 0 for row in check_results):

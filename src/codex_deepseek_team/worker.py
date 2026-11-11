@@ -451,6 +451,15 @@ def parse_args():
                              'Omit to use saved policy; policy default is auto.')
     parser.add_argument('--timeout', type=float, default=0,
                         help='0: wait without a total deadline (default); 1..900: total seconds including queue and retries.')
+    # A declared check may legitimately run for minutes: a compiler, a full test
+    # suite, an integration stand. The per-command ceiling used by the automatic
+    # runner was fixed at 120 s, which silently excluded every such check from
+    # delegation — the work had to stay with the coordinator even when the sandbox
+    # could run it. The ceiling stays 120 s by default and is raised explicitly.
+    parser.add_argument('--check-timeout', type=float, default=120, metavar='SECONDS',
+                        help='Per-command ceiling for declared checks in seconds '
+                             '(default 120; 0 means no per-command ceiling, the total '
+                             'job deadline still applies).')
     parser.add_argument('--attempts', type=int, choices=[1, 2, 3],
                         help='Read-only: 2 by default. Managed full-access uses one attempt and explicit resume.')
     parser.add_argument('--delegation-level', type=settings.parse_level, choices=settings.LEVELS,
