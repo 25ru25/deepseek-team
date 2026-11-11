@@ -1661,7 +1661,7 @@ def plan_task(root: Path, task_id: str, plan: dict) -> dict:
         return task
 
 
-def _retention_ok(task: dict, deliverable: dict) -> bool:
+def _retention_ok(task: dict, deliverable: dict, root: Path | None = None) -> bool:
     retention = deliverable.get("retention")
     if not isinstance(retention, dict):
         return False
@@ -1670,12 +1670,49 @@ def _retention_ok(task: dict, deliverable: dict) -> bool:
     if not isinstance(evidence, str) or len(evidence.strip()) < 5:
         return False
     if code in TECHNICAL_RETENTION:
-        return any(
+        if any(
             row.get("deliverable_id") == deliverable.get("id")
             and row.get("code") == code
             and row.get("source") == "runner"
             for row in task.get("constraints", [])
-        )
+        ):
+            return True
+        # A technical environment limit is a property of the MACHINE and the
+        # PROJECT, not of a single deliverable. The runner records it against one
+        # deliverable_id of one task, but coordination tasks are opened per
+        # session and rotate several times a day. Requiring a fresh record in
+        # every new task therefore means launching a worker that is known in
+        # advance to fail, purely to re-create a record that already exists.
+        #
+        # Measured on one project (2026-11-11): five ledger entries across FOUR
+        # different tasks, all `cause=environment`, `stage=preparation`, all for
+        # the same missing toolchain. Installing it into the sandbox is not an
+        # option there: JDK 286 MB plus a 4.5 GB Gradle cache.
+        #
+        # The relaxation is deliberately narrow, and the SECOND condition is the
+        # important one: a sibling record is accepted only when this deliverable
+        # declares no executable checks — i.e. the router itself already resolved
+        # it to the coordinator with `ineligible_verification`. A deliverable
+        # with a working check (for example a plain `node` guard, which does run
+        # in the sandbox) is unaffected and must still be delegated.
+        if root is not None and not (deliverable.get("checks") or []):
+            try:
+                tasks_dir = _project_dir(root) / "tasks"
+                here = task.get("id")
+                for path in sorted(tasks_dir.glob("task-*.json"))[-64:]:
+                    if path.stem == here:
+                        continue
+                    try:
+                        sibling = _read(path)
+                    except Exception:
+                        continue
+                    for row in sibling.get("constraints", []) or []:
+                        if (row.get("code") == code
+                                and row.get("source") == "runner"):
+                            return True
+            except Exception:
+                pass
+        return False
     if code == "secret_or_signing":
         return (deliverable.get("kind") == "metadata"
                 and retention.get("sensitive") is True)
@@ -1757,7 +1794,7 @@ def validate_task(root: Path, task_id: str) -> list[str]:
         if executor == "coordinator" and eligible:
             if access == "read-only" and kind in WORKER_WRITE_KINDS:
                 continue
-            if (level == 75 and not _retention_ok(task, item)
+            if (level == 75 and not _retention_ok(task, item, root)
                     and not _current_cancellation(task, item)):
                 issues.append(f"{item['id']}: worker-eligible {kind} retained by coordinator without a supported constraint")
     if level == 75 and access == "full-access" and eligible_count and worker_count == 0:
