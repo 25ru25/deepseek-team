@@ -1767,6 +1767,29 @@ def validate_task(root: Path, task_id: str) -> list[str]:
     return issues
 
 
+RESULT_SUMMARY_LIMIT = 4000
+
+
+def _bounded_result(summary: object) -> str:
+    """Bound a worker's report, and SAY SO when it does not fit.
+
+    The report is written for the coordinator to act on, and a silent cut is
+    indistinguishable from a short report: the reader has no way to know that a
+    numbered list ended at item 11 because the worker stopped there, or because
+    the ledger stopped storing it. Measured on one project: a verification of
+    fourteen claims lost its last three that way, and the loss was noticed only
+    by counting.
+
+    The bound itself is unchanged. Only the silence is removed.
+    """
+    text = str(summary)
+    if len(text) <= RESULT_SUMMARY_LIMIT:
+        return text
+    dropped = len(text) - RESULT_SUMMARY_LIMIT
+    notice = f'\n[result truncated by the ledger: {dropped} more characters]'
+    return text[:RESULT_SUMMARY_LIMIT - len(notice)] + notice
+
+
 def _assignment(task: dict, assignment_id: str) -> dict:
     for row in task.get("assignments", []):
         if row.get("id") == assignment_id:
@@ -2432,7 +2455,7 @@ def assignment_finished(root: Path, task_id: str, assignment_id: str,
             error_kind = 'verification' if any(check.get('exit_code') for check in checks) else 'execution'
         if error_kind not in (None, 'verification', 'provider', 'execution', 'environment', 'cancelled'):
             raise CoordinationError('Unknown worker failure classification.', 64)
-        row.update(status=status, result_summary=str(result_summary)[:4000],
+        row.update(status=status, result_summary=_bounded_result(result_summary),
                    worker_changes=sorted(set(worker_changes)), checks=list(checks),
                    finished_at=time.time(), error_kind=error_kind, exit_code=exit_code,
                    queue_state='finished')
