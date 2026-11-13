@@ -301,14 +301,21 @@ def _deliverable_outcome(task, item):
     return result.get('outcome') or 'pending'
 
 
-def _current_cancellation(task, item):
-    """A current cancellation is historical, not retained active work.
+TERMINAL_DELIVERABLE_OUTCOMES = ('accepted', 'cancelled')
+
+
+def _current_terminal_result(task, item):
+    """A deliverable with a current terminal result is history, not retained work.
+
+    Both terminal outcomes describe work that is over: ``cancelled`` abandons it,
+    ``accepted`` finishes it. Neither leaves anything to delegate, so a retention
+    complaint about either has no subject.
 
     Outcome freshness still comes from ``_deliverable_outcome`` so a later
     mutation invalidates it. Requiring the same nonempty evidence as the result
     recorder prevents a bare ledger outcome from bypassing distribution checks.
     """
-    if _deliverable_outcome(task, item) != 'cancelled':
+    if _deliverable_outcome(task, item) not in TERMINAL_DELIVERABLE_OUTCOMES:
         return False
     result = item.get('result')
     return (isinstance(result, dict)
@@ -1758,7 +1765,7 @@ def validate_task(root: Path, task_id: str) -> list[str]:
             if access == "read-only" and kind in WORKER_WRITE_KINDS:
                 continue
             if (level == 75 and not _retention_ok(task, item)
-                    and not _current_cancellation(task, item)):
+                    and not _current_terminal_result(task, item)):
                 issues.append(f"{item['id']}: worker-eligible {kind} retained by coordinator without a supported constraint")
     if level == 75 and access == "full-access" and eligible_count and worker_count == 0:
         issues.append("75/full-access requires worker assignment for separable worker-eligible deliverables")
