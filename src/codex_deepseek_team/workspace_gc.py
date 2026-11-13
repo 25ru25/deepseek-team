@@ -389,6 +389,12 @@ def _valid_extra(entry):
             and type(entry.get('device')) is int and type(entry.get('inode')) is int)
 
 
+# Stored in place of the patch when a cancellation could not capture one. It is a
+# valid empty diff, so every reader that parses `changes.patch` keeps working, and
+# the reason stays in the file rather than only in a log that is not kept.
+_CAPTURE_REFUSED = b'# result capture refused on cancellation: %s\n'
+
+
 def finalize(copy, *, reason='accepted', cancelled=False, orphan=False, before_finalize=None):
     # Keep the owner lock through the entire (possibly interrupted) rmtree,
     # while releasing the creation fence before recursive deletion.
@@ -447,7 +453,17 @@ def _finalize(copy, *, reason, cancelled, orphan, owner_fd, before_finalize):
                     before_finalize()
                     # Attestation can repair association; keep its durable lease.
                     lease = lifecycle.read(copy)
-                patch = _capture(copy)
+                # Cancellation gives the result up by definition, so a refused
+                # capture must not be able to lock the copy forever. Acceptance
+                # keeps the strict path: there the patch IS the deliverable, and
+                # a capture failure has to stop finalization.
+                if cancelled:
+                    try:
+                        patch = _capture(copy)
+                    except Exception as cause:
+                        patch = _CAPTURE_REFUSED % str(cause).encode('utf-8', 'replace')
+                else:
+                    patch = _capture(copy)
                 lifecycle.atomic_file(fd, 'changes.patch', patch)
                 result = {'schema': 1, 'workspace_id': copy.id,
                           'source': str(copy.source),
