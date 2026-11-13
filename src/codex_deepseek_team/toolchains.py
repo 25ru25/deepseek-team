@@ -423,6 +423,15 @@ def _staged_directory_exists(expanded: str, staged) -> bool:
         if lexical == final or lexical.is_relative_to(final):
             remainder = lexical.relative_to(final)
             return (staging / remainder).is_dir()
+    # A declared destination's PARENT is created by the move itself
+    # (_ensure_directory_chain with create=True), and that chain is proven safe
+    # before any write, so a prepared variable may legitimately name it. Without
+    # this, a recipe whose variable is the common parent of two copy
+    # destinations can never be replayed: the parent does not exist yet at
+    # validation time, and no single destination contains it.
+    for final, staging in staged:
+        if final.is_relative_to(lexical) and staging.is_dir():
+            return True
     return False
 
 
