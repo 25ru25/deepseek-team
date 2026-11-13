@@ -821,6 +821,39 @@ def _exclude_pattern(relative: str) -> str:
     return '/' + escaped
 
 
+def _prepared_root_excludes(copy_path, environment) -> list[str]:
+    """Exclude the copy-relative root each prepared variable points at.
+
+    A prepared variable may name the COMMON PARENT of several copy destinations
+    (a Gradle home above its wrapper and its caches). A tool running inside the
+    sandbox writes its own caches into that root, and those files are
+    instrumentation, not worker output: with the root unexcluded, result capture
+    adds every one of them to the patch, the patch exceeds its bound, and the
+    copy cannot be finalized by any supported route.
+
+    Only the FIRST component is returned, and only for a value that resolves
+    strictly inside the owned copy, so nothing outside the prepared area is
+    hidden from capture. Duplicates are dropped by the caller.
+    """
+    excludes: list[str] = []
+    copy_root = os.path.realpath(copy_path)
+    for value in environment.values():
+        if not isinstance(value, str):
+            continue
+        for element in value.split(':'):
+            expanded = element.replace(_PLACEHOLDER, str(copy_path))
+            if '\0' in expanded or not os.path.isabs(expanded):
+                continue
+            real = os.path.realpath(expanded)
+            if not real.startswith(copy_root + os.sep):
+                continue
+            parts = PurePosixPath(os.path.relpath(real, copy_root)).parts
+            if not parts or parts[0] in ('.', '..'):
+                continue
+            excludes.append(_exclude_pattern(parts[0]) + '/')
+    return excludes
+
+
 def _write_excludes(copy, patterns: list[str]) -> None:
     git_dir = copy.path / '.git'
     info = os.lstat(git_dir)
@@ -1323,6 +1356,7 @@ def _materialize(copy, declarations: dict, *, recover: bool) -> dict:
         patterns.append(_exclude_pattern(TOOLS_DIRNAME) + '/')
     for _, destination in copy_sources:
         patterns.append(_exclude_pattern(destination))
+    patterns.extend(_prepared_root_excludes(copy.path, environment))
     if patterns:
         _write_excludes(copy, patterns)
         copy.metadata['git_digest'] = workspace._git_digest(copy.path)
