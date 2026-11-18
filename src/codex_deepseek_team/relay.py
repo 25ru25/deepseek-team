@@ -22,6 +22,9 @@ MAX_REQUEST = 64 * 1024 * 1024
 ENDPOINTS = frozenset(('/responses', '/v1/responses', '/anthropic/v1/messages',
                        '/anthropic/v1/messages/count_tokens'))
 LOCAL_CREDENTIAL = 'deepseek-team-isolated-client'
+# Fork SN: attribution for the usage ledger (task/assignment/workspace/runtime).
+# Set by the managed runner before it opens the relay; identifiers only.
+USAGE_CONTEXT: dict = {}
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -67,6 +70,10 @@ class _Handler(BaseHTTPRequestHandler):
                 headers[name] = self.headers[name]
         connection = None
         started = False
+        # Fork SN: passive usage accounting, host-side relay only (never the bridge).
+        sink = getattr(self.server, 'usage_sink', None)
+        tap = None
+        status = 0
         try:
             connection, auth = self.server.connection()
             headers.update(auth)
@@ -74,30 +81,75 @@ class _Handler(BaseHTTPRequestHandler):
             response = connection.getresponse()
             if connection.sock is not None:
                 connection.sock.settimeout(None)  # silence is not a total timeout
+            status = response.status
             if response.status >= 400:
                 self.server.failures.append(response.status)
+            content_type = response.getheader('Content-Type', 'application/json')
+            if sink is not None:
+                tap = _usage_tap(content_type)
             self.send_response(response.status)
-            self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+            self.send_header('Content-Type', content_type)
             self.end_headers()
             started = True
             while data := response.read1(65536):
                 self.wfile.write(data)
                 self.wfile.flush()
+                if tap is not None:
+                    tap.feed(data)
         except (OSError, http.client.HTTPException):
             self.server.failures.append(502)
+            status = status or 502
             if not started:
                 self.send_error(502, 'Provider transport unavailable')
         finally:
             if connection is not None:
                 connection.close()
+            if sink is not None:
+                _report_usage(sink, url.path, body, tap, status)
 
     def do_CONNECT(self):
         self.send_error(403, 'Tunnelling is not supported')
 
 
+def _usage_tap(content_type):
+    try:
+        from . import usage_ledger
+        return usage_ledger.UsageTap(content_type)
+    except Exception:  # noqa: BLE001 - accounting never disturbs the relay
+        return None
+
+
+def _report_usage(sink, path, body, tap, status):
+    try:
+        from . import usage_ledger
+        if path in usage_ledger.SKIPPED_ENDPOINTS:
+            return
+        if tap is not None:
+            tap.close()
+        model = (tap.model if tap is not None else None) or usage_ledger.request_model(body)
+        counters = tap.counters() if tap is not None else {'input_miss': 0, 'input_hit': 0, 'output': 0}
+        sink(path, model, counters, status)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     block_on_close = False
+
+
+def _ledger_sink(usage_context, ledger_file):
+    try:
+        from . import usage_ledger
+        ctx = usage_ledger.context(**(usage_context or {}))
+    except Exception:  # noqa: BLE001
+        return None
+
+    def sink(endpoint, model, counters, status):
+        usage_ledger.append(usage_ledger.record(
+            endpoint=endpoint, model=model, counters=counters, status=status,
+            ctx=ctx, source='relay'), ledger_file)
+    return sink
 
 
 class ProviderRelay(AbstractContextManager):
@@ -107,13 +159,20 @@ class ProviderRelay(AbstractContextManager):
     never accepts an upstream URL, host, proxy, redirect or endpoint override.
     """
     def __init__(self, path: Path, credential: str,
-                 upstream: tuple[str, str, int] = ('https', 'api.deepseek.com', 443)):
+                 upstream: tuple[str, str, int] = ('https', 'api.deepseek.com', 443),
+                 usage_context: dict | None = None, usage_ledger_file=None):
         self.path = Path(path)
         self.server = _UnixServer(str(self.path), _Handler)
         os.chmod(self.path, 0o600)
         self.failures: list[int] = []
         self.server.failures = self.failures
+        self.server.usage_sink = None
         scheme, host, port = upstream
+        # Fork SN: account usage only for the real provider (offline fixtures
+        # inject other upstreams) or when a test names its own ledger file.
+        if usage_ledger_file is not None or upstream == ('https', 'api.deepseek.com', 443):
+            self.server.usage_sink = _ledger_sink(
+                usage_context if usage_context is not None else dict(USAGE_CONTEXT), usage_ledger_file)
         if scheme not in ('http', 'https'):
             self.server.server_close()
             self.path.unlink(missing_ok=True)

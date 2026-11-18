@@ -429,6 +429,9 @@ def run(args, policy: settings.Policy, api, copy=None) -> int:
                             check_timeout_seconds=check_timeout,
                             attempt_id=execution_attempt_id)
                         coord_started = True
+                    relay.USAGE_CONTEXT = {'task': coord_task, 'assignment': coord_assignment,
+                                           'workspace': copy.id, 'runtime': runtime,
+                                           'project': copy.source}
                     with relay.ProviderRelay(socket_path, key) as provider:
                         timeout = args.job_deadline - time.monotonic() if args.job_deadline else None
                         if timeout is not None and timeout <= 0:

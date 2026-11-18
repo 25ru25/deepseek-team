@@ -431,6 +431,25 @@ def run(args):
     return run_worker(args)
 
 
+def _ledger_runtime_usage(runtime, out, code):
+    """Fork SN: the direct read-only path has no host relay; record the usage
+    the worker CLI itself reports. Silent on any failure or absent usage."""
+    try:
+        from . import usage_ledger
+        rows = usage_ledger.runtime_summary(runtime, out)
+        if not rows:
+            return
+        ctx = usage_ledger.context(runtime=runtime)
+        for model, counters, requests in rows:
+            if not any(counters.values()):
+                continue
+            usage_ledger.append(usage_ledger.record(
+                endpoint='runtime:' + runtime, model=model or MODEL, counters=counters,
+                status=code, ctx=ctx, source='runtime-summary', requests=requests))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_worker(args):
     requested_effort = getattr(args, 'effort', None)
     effort = DEFAULT_EFFORT if requested_effort in (None, 'auto') else effort_level(requested_effort)
@@ -479,6 +498,7 @@ def run_worker(args):
                 if remaining is not None and remaining <= 0:
                     raise WorkerError(124, 'DeepSeek worker exceeded its total timeout.')
                 code, out, err = execute(base_command, env, task, remaining)
+                _ledger_runtime_usage(runtime, out, code)
                 message, errors, completed = runtime_result(runtime, out)
                 diagnostics = redact(err + ('\n' + errors if errors else ''), key)
                 if code == 0 and (not completed or not message.strip()):
