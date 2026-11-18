@@ -436,9 +436,14 @@ class CancelledRetentionTests(CoordinationCase):
             })
 
     def test_only_a_current_evidenced_cancellation_bypasses_retention(self):
+        # Форк SN: в нашей сборке `accepted` — такой же терминальный исход, как
+        # `cancelled`, и тоже освобождает предмет, оставленный координатором, от
+        # правила удержания (ветка port013/release-terminal-deliverables). Поэтому
+        # случай "accepted" перенесён из списка «жалоба остаётся» в отдельный тест
+        # test_fork_sn_accepted_result_also_bypasses_retention ниже. Апстрим
+        # закрепляет обратное.
         cases = (
             ("pending", None),
-            ("accepted", ("observe", "accepted")),
             ("rework", ("observe", "rework")),
             ("rejected", ("observe", "rejected")),
             ("infrastructure", ("observe", "infrastructure")),
@@ -472,6 +477,19 @@ class CancelledRetentionTests(CoordinationCase):
                         for issue in issues),
                     (label, issues),
                 )
+
+    def test_fork_sn_accepted_result_also_bypasses_retention(self):
+        # Форк SN: ожидание обратно апстримному — принятый (accepted) с доказательством
+        # предмет больше не даёт жалобу «retained by coordinator».
+        task, _ = self.plan_cancelled_work(sequence=1)
+        coordination.observe_coordinator_result(
+            self.repo, task["id"], "cancelled-impl", "accepted", "recorded outcome")
+        issues = coordination.validate_task(self.repo, task["id"])
+        self.assertFalse(
+            any("cancelled-impl" in issue and "retained by coordinator" in issue
+                for issue in issues),
+            issues,
+        )
 
     def test_cancellation_does_not_waive_worker_assignment_requirements(self):
         task, _ = self.plan_cancelled_work(with_worker=False)
