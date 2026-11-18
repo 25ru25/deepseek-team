@@ -414,7 +414,7 @@ class PreparationFinalizationTests(PreparationFinalizationFixture):
             code, _out, error = self.command(
                 'coordination', 'use', '--path', str(self.source),
                 '--task', task_id, '--assignment', assignment_id,
-                '--disposition', 'rejected',
+                '--disposition', 'rejected', '--reason-code', 'env',  # Форк SN: код обязателен
                 '--evidence', 'CLI inspected and rejected the preparation failure')
         self.assertEqual(code, 0, error)
         self.assertFalse(copy.path.exists())

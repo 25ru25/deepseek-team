@@ -342,6 +342,9 @@ may continue.
 
 Finalize explicitly with `coordination use ... --final` or
 `coordination finalize --task ID --assignment ID --evidence TEXT [--cancel]`.
+A rejection (`use --disposition rejected`, `finalize --cancel`, `result --outcome rejected`)
+also needs `--reason-code` (tests-fail, build-fail, wrong-change, out-of-scope, incomplete,
+oom, timeout, env, other); `coordination reasons [--all-projects]` groups outcomes by code.
 `workspace finalize ID`, `workspace cancel ID`, `workspace recover ID`,
 `workspace resume ID`, `workspace list` and `workspace history` expose the same
 lifecycle. `workspace recover` and `workspace resume` repair ownership/state only

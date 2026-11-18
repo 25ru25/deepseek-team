@@ -4758,3 +4758,102 @@ def summary(task: dict) -> str:
             text += '; next_step=' + row['next_step']
         lines.append(text)
     return "\n".join(lines)
+
+
+# --- Fork SN: mandatory reason code for rejected/failed results -------------
+REASON_CODES = ('tests-fail', 'build-fail', 'wrong-change', 'out-of-scope', 'incomplete',
+                'oom', 'timeout', 'env', 'other')
+
+
+def reason_code_required(root: Path, task_id: str, assignment_id: str, *,
+                         disposition: str | None = None, cancel: bool = False) -> bool:
+    """A rejection, a cancellation or the finalization of a failed run needs a code.
+
+    An idempotent repeat for an already finalized job neither needs nor records
+    one, so replays stay byte-for-byte unchanged."""
+    try:
+        row = _assignment(load_task(root, task_id), assignment_id)
+    except CoordinationError:
+        row = {}
+    if row.get('job_finalization'):
+        return False
+    if disposition == 'rejected' or cancel:
+        return True
+    if disposition is not None:
+        return False
+    return row.get('status') == 'failed' and (row.get('disposition') or {}).get('kind') not in (
+        'incorporated', 'reproduced')
+
+
+def check_reason_code(code, required: bool) -> None:
+    if code is not None and code not in REASON_CODES:
+        raise CoordinationError('Unknown --reason-code; use one of: ' + ', '.join(REASON_CODES) + '.', 64)
+    if required and code is None:
+        raise CoordinationError(
+            'A rejected or failed result requires --reason-code (' + ', '.join(REASON_CODES)
+            + '); keep the free-text --evidence as well. Nothing was changed.', 64)
+
+
+def record_reason_code(root: Path, task_id: str, code: str, *, assignment_id: str | None = None,
+                       deliverable_id: str | None = None) -> None:
+    """Store the code on the assignment (or coordinator deliverable result) row."""
+    if code is None:
+        return
+    with _lock(root):
+        task = load_task(root, task_id)
+        if assignment_id is not None:
+            row = _assignment(task, assignment_id)
+        else:
+            row = next((item for item in task.get('deliverables', [])
+                        if item.get('id') == deliverable_id), None)
+            if row is None:
+                raise CoordinationError('Unknown deliverable.', 66)
+            row = row.setdefault('result', {}) if isinstance(row.get('result'), dict) else row
+        if row.get('reason_code') == code:
+            return
+        if row.get('reason_code'):
+            row.setdefault('reason_code_history', []).append(row['reason_code'])
+        row['reason_code'] = code
+        row['reason_code_at'] = time.time()
+        _atomic(_task_path(root, task_id), task)
+
+
+def assignment_outcome(row: dict) -> str:
+    """incorporated / rejected / failed / rework / pending for one assignment row."""
+    kind = (row.get('disposition') or {}).get('kind')
+    if kind in ('incorporated', 'reproduced'):
+        return 'incorporated'
+    if kind == 'needs-rework':
+        return 'rework'
+    if row.get('status') == 'failed':
+        return 'failed'
+    if kind == 'rejected':
+        return 'rejected'
+    return 'pending'
+
+
+def reason_report(task_files) -> dict:
+    """Group assignments by outcome and reason code; older rows have ``unknown``."""
+    outcomes: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    total = 0
+    for path in task_files:
+        try:
+            task = _read(Path(path))
+        except Exception:  # noqa: BLE001 - a damaged ledger file is skipped in a report
+            continue
+        for row in task.get('assignments', []) or []:
+            outcome = assignment_outcome(row)
+            total += 1
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            if outcome in ('rejected', 'failed'):
+                code = row.get('reason_code') or 'unknown'
+                reasons[code] = reasons.get(code, 0) + 1
+    return {'assignments': total, 'outcomes': outcomes, 'reasons': reasons}
+
+
+def assignment_finalized(root: Path, task_id: str, assignment_id: str) -> bool:
+    try:
+        return bool(_assignment(load_task(root, task_id), assignment_id).get('job_finalization'))
+    except CoordinationError:
+        return False

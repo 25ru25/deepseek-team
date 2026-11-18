@@ -81,6 +81,8 @@ def main(argv):
     use.add_argument('--disposition', required=True,
                      choices=['incorporated', 'reproduced', 'rejected', 'needs-rework'])
     use.add_argument('--evidence', required=True)
+    use.add_argument('--reason-code', choices=coordination.REASON_CODES,
+                     help='Fork SN: why a result was rejected or failed (required with --disposition rejected).')
     use.add_argument('--final', action='store_true',
                      help='Attest final integration/rejection; close this job and delete its execution copy.')
     use.add_argument('--cost-usd', type=float,
@@ -101,6 +103,8 @@ def main(argv):
     result.add_argument('--outcome', required=True,
                         choices=['accepted', 'rework', 'rejected', 'infrastructure', 'cancelled', 'unknown'])
     result.add_argument('--evidence', required=True)
+    result.add_argument('--reason-code', choices=coordination.REASON_CODES,
+                     help='Fork SN: why a result was rejected or failed (required with --outcome rejected).')
     result.add_argument('--cost-usd', type=float,
                         help='Measured total cost; omit when there is no defensible dollar cost.')
 
@@ -110,6 +114,8 @@ def main(argv):
     abandon.add_argument('--task', required=True)
     abandon.add_argument('--assignment', required=True)
     abandon.add_argument('--evidence', required=True)
+    abandon.add_argument('--reason-code', choices=coordination.REASON_CODES,
+                     help='Fork SN: why a result was rejected or failed (optional).')
     abandon.add_argument(
         '--confirmed-stopped', action='store_true', required=True,
         help='Attest that remaining worker processes were stopped and verified stopped.')
@@ -120,12 +126,16 @@ def main(argv):
     cancel.add_argument('--task', required=True)
     cancel.add_argument('--assignment', required=True)
     cancel.add_argument('--evidence', required=True)
+    cancel.add_argument('--reason-code', choices=coordination.REASON_CODES,
+                     help='Fork SN: why a result was rejected or failed (optional).')
 
     finalize = subs.add_parser('finalize', help='Finalize one reviewed job and immediately remove its execution copy.')
     finalize.add_argument('--path', type=Path, default=Path.cwd())
     finalize.add_argument('--task', required=True)
     finalize.add_argument('--assignment', required=True)
     finalize.add_argument('--evidence', required=True)
+    finalize.add_argument('--reason-code', choices=coordination.REASON_CODES,
+                     help='Fork SN: why a result was rejected or failed (required with --cancel or for a failed run).')
     finalize.add_argument('--cancel', action='store_true', help='Explicitly cancel/reject this stopped job.')
     finalize.add_argument(
         '--discard-result', action='store_true',
@@ -136,6 +146,12 @@ def main(argv):
         'complete', help='Close a task whose distribution and recorded outcomes are terminal.')
     complete.add_argument('--path', type=Path, default=Path.cwd())
     complete.add_argument('--task', required=True)
+
+    reasons = subs.add_parser(
+        'reasons', help='Fork SN: assignments by outcome and rejected/failed reason code.')
+    reasons.add_argument('--path', type=Path, default=Path.cwd())
+    reasons.add_argument('--all-projects', action='store_true')
+    reasons.add_argument('--json', action='store_true')
 
     args = parser.parse_args(argv[1:])
     try:
@@ -153,7 +169,28 @@ def main(argv):
                 'diagnostics': coordination.routing_diagnostics(task),
             }, indent=2))
             return 78 if issues else 0
+        if args.command == 'reasons':
+            if args.all_projects:
+                files = sorted((coordination._state_root() / 'coordination').glob('*/tasks/task-*.json'))
+            else:
+                files = sorted((coordination._project_dir(args.path) / 'tasks').glob('task-*.json'))
+            report = coordination.reason_report(files)
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                total = report['assignments']
+                print(f'Assignments: {total}')
+                for name, count in sorted(report['outcomes'].items(), key=lambda kv: -kv[1]):
+                    print(f'  {name}: {count} ({100.0 * count / total:.1f}%)')
+                print('Rejected/failed by reason code:')
+                for name, count in sorted(report['reasons'].items(), key=lambda kv: -kv[1]):
+                    print(f'  {name}: {count}')
+            return 0
         if args.command == 'use':
+            coordination.check_reason_code(args.reason_code, coordination.reason_code_required(
+                args.path, args.task, args.assignment, disposition=args.disposition))
+            record_reason = args.reason_code and not coordination.assignment_finalized(
+                args.path, args.task, args.assignment)
             if args.final and args.disposition == 'needs-rework':
                 raise coordination.CoordinationError(
                     'needs-rework preserves the same workspace; omit --final until corrections are accepted.', 64)
@@ -171,31 +208,51 @@ def main(argv):
             if args.final:
                 task = coordination.finalize_assignment(args.path, args.task, args.assignment,
                     args.evidence, cancelled=args.disposition == 'rejected')
+            if record_reason:
+                coordination.record_reason_code(args.path, args.task, args.reason_code,
+                                                assignment_id=args.assignment)
             print(coordination.summary(task))
             return 0
         if args.command == 'finalize':
             if args.discard_result and not args.cancel:
                 raise coordination.CoordinationError(
                     '--discard-result is valid only with --cancel.', 64)
+            coordination.check_reason_code(args.reason_code, coordination.reason_code_required(
+                args.path, args.task, args.assignment, cancel=args.cancel))
+            record_reason = args.reason_code and not coordination.assignment_finalized(
+                args.path, args.task, args.assignment)
             task = coordination.finalize_assignment(
                 args.path, args.task, args.assignment, args.evidence,
                 cancelled=args.cancel, discard_result=args.discard_result)
+            if record_reason:
+                coordination.record_reason_code(args.path, args.task, args.reason_code,
+                                                assignment_id=args.assignment)
             print(coordination.summary(task))
             return 0
         if args.command == 'result':
+            coordination.check_reason_code(args.reason_code, args.outcome == 'rejected')
             task = coordination.observe_coordinator_result(args.path, args.task, args.deliverable,
                         args.outcome, args.evidence, cost_usd=args.cost_usd)
+            if args.reason_code:
+                coordination.record_reason_code(args.path, args.task, args.reason_code,
+                                                deliverable_id=args.deliverable)
             print(coordination.summary(task))
             return 0
         if args.command == 'abandon':
             task = coordination.abandon_assignment(
                 args.path, args.task, args.assignment, args.evidence,
                 confirmed_stopped=args.confirmed_stopped)
+            if args.reason_code:
+                coordination.record_reason_code(args.path, args.task, args.reason_code,
+                                                assignment_id=args.assignment)
             print(coordination.summary(task))
             return 0
         if args.command == 'cancel':
             task = coordination.cancel_unstarted_assignment(
                 args.path, args.task, args.assignment, args.evidence)
+            if args.reason_code:
+                coordination.record_reason_code(args.path, args.task, args.reason_code,
+                                                assignment_id=args.assignment)
             print(coordination.summary(task))
             return 0
         if args.command == 'complete':
