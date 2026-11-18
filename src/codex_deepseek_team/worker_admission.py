@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import time
 
-from . import coordination, settings, state_storage
+from . import coordination, memory_gate, settings, state_storage
 from .routing import RoutingService
 from .routing_models import RoutingError
 
@@ -140,6 +140,14 @@ def acquire(args, api, *, policy=None, root=None):
             # the serialization point with C5 cancellation before allocation.
             coordination.revalidate_launch_reservation(
                 root, task_id, args.coord_assignment, reservation)
+
+        # Fork SN: never start a worker into a host that is about to OOM.
+        def memory_wait(reasons):
+            queue_state('waiting')
+            print('Queued: waiting for memory before starting the DeepSeek worker ('
+                  + '; '.join(reasons) + ').', file=api.sys.stderr, flush=True)
+        memory_gate.wait(api.WorkerError, validate=validate, deadline=args.job_deadline,
+                         on_wait=memory_wait)
         validate()
         if args.job_deadline is not None and time.monotonic() >= args.job_deadline:
             raise api.WorkerError(124, 'DeepSeek worker exceeded its total timeout while queued.')
